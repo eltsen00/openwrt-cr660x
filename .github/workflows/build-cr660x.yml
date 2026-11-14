@@ -31,8 +31,8 @@ jobs:
       EXTRA_PACKAGES: >-
         luci luci-i18n-base-zh-cn
         luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn
-        luci-app-mosdns luci-i18n-mosdns-zh-cn
         kmod-mt7915-firmware kmod-mt7915e
+        minieap
 
     steps:
       - name: 检出仓库
@@ -41,7 +41,10 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zstd curl ca-certificates
+          sudo apt-get install -y --no-install-recommends \
+            zstd curl ca-certificates git build-essential gawk unzip \
+            file python3 python-is-python3 python3-setuptools wget \
+            libncurses-dev zlib1g-dev rsync gettext bzip2 xz-utils
 
       - name: 确定 OpenWrt 版本
         id: ver
@@ -74,12 +77,12 @@ jobs:
           test -f ib/Makefile
           echo "ImageBuilder 就绪"
 
-      - name: 下载第三方软件包（Argon / MosDNS - mipsel_24kc）
+      - name: 下载第三方软件包（Argon - mipsel_24kc）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p third_party/argon third_party/mosdns ib/packages
+          mkdir -p third_party/argon ib/packages
 
           # Argon 主题 (mipsel_24kc)
           gh release download -R jerrykuku/luci-theme-argon -D third_party/argon --clobber \
@@ -87,15 +90,42 @@ jobs:
             -p 'luci-app-argon-config-*.apk' \
             -p 'luci-i18n-argon-config-zh-cn-*.apk'
 
-          # MosDNS v5 (mipsel_24kc)
-          gh release download -R sbwml/luci-app-mosdns -D third_party/mosdns --clobber \
-            -p 'mipsel_24kc-openwrt-25.12.tar.gz'
-          tar -xzf third_party/mosdns/mipsel_24kc-openwrt-25.12.tar.gz -C third_party/mosdns
-
           cp third_party/argon/*.apk ib/packages/
-          cp third_party/mosdns/packages_ci/*.apk ib/packages/
-          echo "已准备软件包："
+          echo "已准备第三方软件包："
           ls -lh ib/packages/*.apk
+
+      - name: 编译自定义 minieap (OpenWrt SDK)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://downloads.openwrt.org/releases/${VERSION}/targets/ramips/mt7621"
+          INDEX_HTML=$(curl -fsSL --retry 5 --retry-all-errors "${BASE_URL}/")
+          SDK_FILE=$(printf '%s\n' "${INDEX_HTML}" \
+            | grep -oE "openwrt-sdk-${VERSION}-ramips-mt7621[^\"]*\.tar\.zst" | sed -n '1p')
+          if [ -z "${SDK_FILE}" ]; then
+            echo "无法找到 OpenWrt ${VERSION} 对应的 SDK"
+            exit 1
+          fi
+          echo "下载 SDK: ${BASE_URL}/${SDK_FILE}"
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 20 -o sdk.tar.zst "${BASE_URL}/${SDK_FILE}"
+          mkdir -p sdk
+          tar --use-compress-program=unzstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+          git clone --depth 1 https://github.com/undefined443/openwrt-minieap-sysu.git sdk/package/minieap
+
+          cd sdk
+          echo "CONFIG_PACKAGE_minieap=m" >> .config
+          make defconfig
+          make package/minieap/compile V=s
+
+          mkdir -p "${GITHUB_WORKSPACE}/third_party/minieap" "${GITHUB_WORKSPACE}/ib/packages"
+          find bin/packages -type f -name 'minieap*.apk' \
+            -exec cp -v {} "${GITHUB_WORKSPACE}/third_party/minieap/" \; \
+            -exec cp -v {} "${GITHUB_WORKSPACE}/ib/packages/" \;
+          test -n "$(find "${GITHUB_WORKSPACE}/third_party/minieap" -maxdepth 1 -name 'minieap*.apk' -print -quit)"
+          echo "已编译 minieap："
+          ls -lh "${GITHUB_WORKSPACE}/third_party/minieap/"*.apk
 
       - name: 构建固件
         env:
@@ -126,6 +156,7 @@ jobs:
           find ib/bin/targets -type f \
             \( -name '*.bin' -o -name '*.itb' -o -name '*.manifest' \) \
             -exec cp -v {} out/ \;
+          cp -v third_party/minieap/*.apk out/
           ( cd out && sha256sum -- * > SHA256SUMS )
           ls -lh out
 
@@ -157,8 +188,8 @@ jobs:
             | WiFi | 双频合一 `cr660x` / `12345678` |
             | 驱动 | 开源 mt76 (mt7915e) + 调优参数 |
             | 主题 | Argon（第三方） |
-            | DNS | MosDNS v5（第三方） |
-            | 附加 | LuCI、中文、v2ray-geoip/geosite/geo2txt |
+            | 认证 | MiniEAP (SYSU 自定义版，已内置并随 Release 附带 `.apk` 包) |
+            | 附加 | LuCI、中文 |
 
             ### 刷机说明
             - 已在 OpenWrt：用 `*-squashfs-sysupgrade.bin` 升级
