@@ -11,6 +11,11 @@ on:
         description: "设备：all / cr6606 / cr6608 / cr6609"
         required: false
         default: "all"
+      include_minieap:
+        description: "是否编译并内置 minieap（取消勾选则编译不含 minieap 的固件）"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -28,11 +33,11 @@ jobs:
     env:
       DEVICE: ${{ github.event.inputs.device }}
       REQUESTED_VERSION: ${{ github.event.inputs.version }}
-      EXTRA_PACKAGES: >-
+      INCLUDE_MINIEAP: ${{ inputs.include_minieap }}
+      BASE_PACKAGES: >-
         luci luci-i18n-base-zh-cn
         luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn
         kmod-mt7915-firmware kmod-mt7915e
-        minieap
 
     steps:
       - name: 检出仓库
@@ -95,6 +100,7 @@ jobs:
           ls -lh ib/packages/*.apk
 
       - name: 编译自定义 minieap (OpenWrt SDK)
+        if: ${{ inputs.include_minieap == true || inputs.include_minieap == 'true' }}
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
@@ -128,6 +134,7 @@ jobs:
           ls -lh "${GITHUB_WORKSPACE}/third_party/minieap/"*.apk
 
       - name: 构建固件
+        id: build
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
@@ -140,6 +147,17 @@ jobs:
           esac
           echo "构建设备: ${PROFILES}"
 
+          PACKAGES="${BASE_PACKAGES}"
+          if [ "${INCLUDE_MINIEAP:-true}" = "true" ]; then
+            PACKAGES="${PACKAGES} minieap"
+            echo "mode_label=含 MiniEAP" >> "$GITHUB_OUTPUT"
+            echo "minieap_note=MiniEAP (SYSU 自定义版，已内置并随 Release 附带 .apk 包)" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode_label=不含 MiniEAP" >> "$GITHUB_OUTPUT"
+            echo "minieap_note=未编译及内置 MiniEAP" >> "$GITHUB_OUTPUT"
+          fi
+          echo "构建软件包: ${PACKAGES}"
+
           mkdir -p out
           cd ib
           mkdir -p tmp  # 修复 TMPDIR 目录不存在问题
@@ -147,7 +165,7 @@ jobs:
             echo "::group::ImageBuilder ${P}"
             make image \
               PROFILE="${P}" \
-              PACKAGES="${EXTRA_PACKAGES}" \
+              PACKAGES="${PACKAGES}" \
               FILES="${GITHUB_WORKSPACE}/files"
             echo "::endgroup::"
           done
@@ -156,7 +174,9 @@ jobs:
           find ib/bin/targets -type f \
             \( -name '*.bin' -o -name '*.itb' -o -name '*.manifest' \) \
             -exec cp -v {} out/ \;
-          cp -v third_party/minieap/*.apk out/
+          if [ "${INCLUDE_MINIEAP:-true}" = "true" ]; then
+            cp -v third_party/minieap/*.apk out/
+          fi
           ( cd out && sha256sum -- * > SHA256SUMS )
           ls -lh out
 
@@ -174,7 +194,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: cr660x-${{ steps.ver.outputs.version }}-open-${{ github.run_number }}
-          name: OpenWrt ${{ steps.ver.outputs.version }} for CR660X #${{ github.run_number }}
+          name: OpenWrt ${{ steps.ver.outputs.version }} for CR660X #${{ github.run_number }} (${{ steps.build.outputs.mode_label }})
           body: |
             ## OpenWrt ${{ steps.ver.outputs.version }} · Xiaomi CR660X (Open-Source mt76)
 
@@ -184,16 +204,16 @@ jobs:
             | 项目 | 内容 |
             | --- | --- |
             | 设备 | CR6606 / CR6608 / CR6609 (ramips/mt7621) |
-            | 管理地址 | http://192.168.66.1（默认无密码） |
-            | WiFi | 双频合一 `cr660x` / `12345678` |
+            | 管理地址 | http://192.168.6.1（默认无密码） |
+            | WiFi | 2.4G `cr660x` (ch 6) / 5G `cr660x-5G` (ch 149)，密码 `12345678` |
             | 驱动 | 开源 mt76 (mt7915e) + 调优参数 |
             | 主题 | Argon（第三方） |
-            | 认证 | MiniEAP (SYSU 自定义版，已内置并随 Release 附带 `.apk` 包) |
+            | 认证 | ${{ steps.build.outputs.minieap_note }} |
             | 附加 | LuCI、中文 |
 
             ### 刷机说明
             - 已在 OpenWrt：用 `*-squashfs-sysupgrade.bin` 升级
-            - 首次刷入：先刷 `*-initramfs-kernel.bin` 进入临时系统，再刷 sysupgrade
+            - 原厂 SSH / PB-Boot 首次刷入：用对应型号 `*-squashfs-firmware.bin`
 
             校验文件见 `SHA256SUMS`。
           files: out/*
